@@ -49,12 +49,14 @@ func FunctionDispatcher(function reflect.Value) Dispatcher {
 //      /some/path/<arg0>/<arg1>
 // arg0 and arg1 are mapped to handler method arguments.
 type Route struct {
-	prefix  string
-	name    string
-	pattern *regexp.Regexp
-	methods []string
-	params  []string
-	handler Dispatcher
+	matchPrefix bool
+	prefix      string
+	path        string
+	name        string
+	pattern     *regexp.Regexp
+	methods     []string
+	params      []string
+	handler     Dispatcher
 }
 
 func NewRoute() *Route {
@@ -71,7 +73,7 @@ func (r *Route) String() string {
 
 func (r *Route) Prefix(path string) *Route {
 	r.prefix = path
-	r.path("", false)
+	r.compilePath()
 	return r
 }
 
@@ -116,22 +118,26 @@ func (r *Route) ToMethod(v interface{}, method string) *Route {
 }
 
 func (r *Route) Path(path string) *Route {
-	return r.path(path, false)
+	r.path = path
+	r.matchPrefix = false
+	return r.compilePath()
 }
 
 func (r *Route) PathPrefix(path string) *Route {
-	return r.path(path, true)
+	r.path = path
+	r.matchPrefix = true
+	return r.compilePath()
 }
 
-func (r *Route) path(path string, prefix bool) *Route {
-	routePattern := "^" + pathTransform.ReplaceAllString(r.prefix+path, `([^/]+)`)
-	if !prefix {
+func (r *Route) compilePath() *Route {
+	routePattern := "^" + pathTransform.ReplaceAllString(r.prefix+r.path, `([^/]+)`)
+	if !r.matchPrefix {
 		routePattern += "$"
 	}
 	pattern, _ := regexp.Compile(routePattern)
 	r.pattern = pattern
 	r.params = []string{}
-	for _, arg := range pathTransform.FindAllString(path, 16) {
+	for _, arg := range pathTransform.FindAllString(r.prefix+r.path, 16) {
 		r.params = append(r.params, arg[1:len(arg)-1])
 	}
 	return r
