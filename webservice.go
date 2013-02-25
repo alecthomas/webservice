@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 var (
@@ -16,6 +17,8 @@ var (
 )
 
 type Dispatcher func(cx *Context) bool
+
+type Args map[string]string
 
 type Response struct {
 	S int
@@ -46,7 +49,7 @@ func FunctionDispatcher(function reflect.Value) Dispatcher {
 }
 
 // Routes are specified like so:
-//      /some/path/<arg0>/<arg1>
+//      /some/path/{arg0}/{arg1}
 // arg0 and arg1 are mapped to handler method arguments.
 type Route struct {
 	matchPrefix bool
@@ -69,6 +72,21 @@ func (r *Route) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
 
 func (r *Route) String() string {
 	return fmt.Sprintf("Route{name: %v, pattern: %s, methods: %v}", r.name, r.pattern, r.methods)
+}
+
+func (r *Route) Reverse(args Args) string {
+	path := r.fullPath()
+	for arg, value := range args {
+		path = strings.Replace(path, "{"+arg+"}", value, 1)
+	}
+	return path
+}
+
+func (r *Route) Method() string {
+	if len(r.methods) != 1 {
+		panic("requested single method from route with less or more")
+	}
+	return r.methods[0]
 }
 
 func (r *Route) Prefix(path string) *Route {
@@ -114,6 +132,9 @@ func (r *Route) ToMethod(v interface{}, method string) *Route {
 		panic("unknown method " + method)
 	}
 	r.handler = FunctionDispatcher(function)
+	if r.name == "" {
+		r.name = method
+	}
 	return r
 }
 
@@ -182,6 +203,10 @@ func (r *Route) match(req *http.Request) []string {
 	return r.pattern.FindStringSubmatch(req.RequestURI)
 }
 
+func (r *Route) fullPath() string {
+	return r.prefix + "/" + r.path
+}
+
 func (r *Route) apply(args []string, writer http.ResponseWriter, req *http.Request) bool {
 	return r.handler(&Context{args[1:], writer, req})
 }
@@ -216,6 +241,15 @@ func (s *Service) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
 		}
 	}
 	s.FallbackHandler.ServeHTTP(writer, req)
+}
+
+func (s *Service) Find(name string) *Route {
+	for _, r := range s.routes {
+		if r.name == name {
+			return r
+		}
+	}
+	return nil
 }
 
 func (s *Service) route() *Route {
