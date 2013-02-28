@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vmihailenco/msgpack"
 	"io"
 	"net/http"
 	"reflect"
@@ -13,10 +14,10 @@ import (
 )
 
 var (
-	pathTransform = regexp.MustCompile(`({\w+})`)
+	pathTransform = regexp.MustCompile(`{((\w+)(\.\.\.)?)}`)
 )
 
-type Dispatcher func(cx *Context) bool
+type Dispatcher func(cx *Context, req interface{}) bool
 
 type Args map[string]string
 
@@ -28,16 +29,23 @@ type Response struct {
 
 func FunctionDispatcher(function reflect.Value) Dispatcher {
 	functype := function.Type()
-	return func(cx *Context) bool {
-		if functype.NumIn() != 1+len(cx.Args) {
-			cx.ResponseWriter.WriteHeader(500)
+	return func(cx *Context, req interface{}) bool {
+		shift := 1
+		if req != nil {
+			shift++
+		}
+		if functype.NumIn() != shift+len(cx.Args) {
+			cx.ResponseWriter.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(cx.ResponseWriter, "Invalid number of args")
 			return true
 		}
-		in := make([]reflect.Value, 1, 1+len(cx.Args))
+		in := make([]reflect.Value, shift, shift+len(cx.Args))
 		in[0] = reflect.ValueOf(cx)
+		if req != nil {
+			in[1] = reflect.ValueOf(req)
+		}
 		for i, s := range cx.Args {
-			v, err := coerce(s, functype.In(i+1))
+			v, err := coerce(s, functype.In(i+shift))
 			if err != nil {
 				return false
 			}
@@ -52,14 +60,14 @@ func FunctionDispatcher(function reflect.Value) Dispatcher {
 //      /some/path/{arg0}/{arg1}
 // arg0 and arg1 are mapped to handler method arguments.
 type Route struct {
-	matchPrefix bool
-	prefix      string
-	path        string
-	name        string
-	pattern     *regexp.Regexp
-	methods     []string
-	params      []string
-	handler     Dispatcher
+	prefix  string
+	path    string
+	name    string
+	pattern *regexp.Regexp
+	methods []string
+	params  []string
+	handler Dispatcher
+	request reflect.Type
 }
 
 func NewRoute() *Route {
@@ -89,10 +97,20 @@ func (r *Route) Method() string {
 	return r.methods[0]
 }
 
-func (r *Route) Prefix(path string) *Route {
-	r.prefix = path
-	r.compilePath()
+// Automatically decode the request body into a value of type req. Functions
+// and methods will then be called with the signature
+// f(*Context, TypeOf(req), ...)
+func (r *Route) DecodeRequest(req interface{}) *Route {
+	r.request = reflect.TypeOf(req)
+	if r.request.Kind() != reflect.Ptr {
+		panic("request structure must be a pointer")
+	}
 	return r
+}
+
+func (r *Route) Prefix(path string) *Route {
+	r.prefix = strings.TrimRight(path, "/") + "/"
+	return r.compilePath()
 }
 
 func (r *Route) Named(name string) *Route {
@@ -101,7 +119,7 @@ func (r *Route) Named(name string) *Route {
 }
 
 func (r *Route) ToHandler(handler http.Handler) *Route {
-	r.handler = func(cx *Context) bool {
+	r.handler = func(cx *Context, req interface{}) bool {
 		handler.ServeHTTP(cx.ResponseWriter, cx.Request)
 		return true
 	}
@@ -109,7 +127,7 @@ func (r *Route) ToHandler(handler http.Handler) *Route {
 }
 
 func (r *Route) ToHandlerFunc(handler http.HandlerFunc) *Route {
-	r.handler = func(cx *Context) bool {
+	r.handler = func(cx *Context, req interface{}) bool {
 		handler(cx.ResponseWriter, cx.Request)
 		return true
 	}
@@ -139,21 +157,18 @@ func (r *Route) ToMethod(v interface{}, method string) *Route {
 }
 
 func (r *Route) Path(path string) *Route {
-	r.path = path
-	r.matchPrefix = false
-	return r.compilePath()
-}
-
-func (r *Route) PathPrefix(path string) *Route {
-	r.path = path
-	r.matchPrefix = true
+	r.path = strings.TrimLeft(path, "/")
 	return r.compilePath()
 }
 
 func (r *Route) compilePath() *Route {
-	routePattern := "^" + pathTransform.ReplaceAllString(r.prefix+r.path, `([^/]+)`)
-	if !r.matchPrefix {
-		routePattern += "$"
+	routePattern := "^" + r.fullPath() + "$"
+	for _, match := range pathTransform.FindAllStringSubmatch(routePattern, 16) {
+		pattern := `([^/]+)`
+		if match[3] == "..." {
+			pattern = `(.+)`
+		}
+		routePattern = strings.Replace(routePattern, match[0], pattern, 1)
 	}
 	pattern, _ := regexp.Compile(routePattern)
 	r.pattern = pattern
@@ -204,11 +219,30 @@ func (r *Route) match(req *http.Request) []string {
 }
 
 func (r *Route) fullPath() string {
-	return r.prefix + "/" + r.path
+	return r.prefix + r.path
 }
 
 func (r *Route) apply(args []string, writer http.ResponseWriter, req *http.Request) bool {
-	return r.handler(&Context{args[1:], writer, req})
+	cx := &Context{args[1:], writer, req}
+	var request interface{} = nil
+	if r.request != nil {
+		v := reflect.New(r.request.Elem())
+		var err error
+		ct := req.Header.Get("Content-Type")
+		if strings.HasPrefix(ct, "application/json") {
+			decoder := json.NewDecoder(req.Body)
+			err = decoder.Decode(v.Interface())
+		} else if strings.HasPrefix(ct, "application/x-msgpack") {
+			decoder := msgpack.NewDecoder(req.Body)
+			err = decoder.Decode(v.Interface())
+		}
+		if err != nil {
+			cx.RespondWithErrorMessage(err.Error(), http.StatusBadRequest)
+			return true
+		}
+		request = v.Interface()
+	}
+	return r.handler(cx, request)
 }
 
 type NotFoundHandler struct{}
@@ -281,10 +315,6 @@ func (s *Service) Path(path string) *Route {
 	return s.route().Path(path)
 }
 
-func (s *Service) PathPrefix(path string) *Route {
-	return s.route().PathPrefix(path)
-}
-
 func (s *Service) ToFunction(f interface{}) *Route {
 	return s.route().ToFunction(f)
 }
@@ -315,14 +345,21 @@ func (c *Context) RespondWithErrorMessage(error string, status int) error {
 }
 
 func (c *Context) Respond(status int, error string, data interface{}) error {
-	c.ResponseWriter.Header().Set("Content-Type", "application/json")
+	ct := c.Request.Header.Get("Accept")
+	c.ResponseWriter.Header().Set("Content-Type", ct)
 	c.ResponseWriter.WriteHeader(status)
-	encoder := json.NewEncoder(c.ResponseWriter)
 	var E interface{} = nil
 	if error != "" {
 		E = error
 	}
-	return encoder.Encode(&Response{S: status, E: E, D: data})
+	if strings.HasPrefix(ct, "application/json") {
+		encoder := json.NewEncoder(c.ResponseWriter)
+		return encoder.Encode(&Response{S: status, E: E, D: data})
+	} else if strings.HasPrefix(ct, "application/x-msgpack") {
+		encoder := msgpack.NewEncoder(c.ResponseWriter)
+		return encoder.Encode(&Response{S: status, E: E, D: data})
+	}
+	return errors.New("unknown accept type " + ct)
 }
 
 func (c *Context) RespondWithStatus(status int) error {
