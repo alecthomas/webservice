@@ -1,11 +1,8 @@
 package webservice
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/vmihailenco/msgpack"
-	"io"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -18,7 +15,6 @@ var (
 )
 
 type Dispatcher func(cx *Context, req interface{}) bool
-
 type Args map[string]string
 
 type Response struct {
@@ -32,11 +28,11 @@ func FunctionDispatcher(function reflect.Value) Dispatcher {
 	return func(cx *Context, req interface{}) bool {
 		shift := 1
 		if req != nil {
+			defer cx.Request.Body.Close()
 			shift++
 		}
 		if functype.NumIn() != shift+len(cx.Args) {
-			cx.ResponseWriter.WriteHeader(http.StatusInternalServerError)
-			io.WriteString(cx.ResponseWriter, "Invalid number of args")
+			cx.Respond(http.StatusInternalServerError, "invalid number of arguments", nil)
 			return true
 		}
 		in := make([]reflect.Value, shift, shift+len(cx.Args))
@@ -227,15 +223,7 @@ func (r *Route) apply(args []string, writer http.ResponseWriter, req *http.Reque
 	var request interface{} = nil
 	if r.request != nil {
 		v := reflect.New(r.request.Elem())
-		var err error
-		ct := req.Header.Get("Content-Type")
-		if strings.HasPrefix(ct, "application/json") {
-			decoder := json.NewDecoder(req.Body)
-			err = decoder.Decode(v.Interface())
-		} else if strings.HasPrefix(ct, "application/x-msgpack") {
-			decoder := msgpack.NewDecoder(req.Body)
-			err = decoder.Decode(v.Interface())
-		}
+		err := Serializers.Decode(req, v.Interface())
 		if err != nil {
 			cx.RespondWithErrorMessage(err.Error(), http.StatusBadRequest)
 			return true
@@ -340,36 +328,24 @@ type Context struct {
 	Request        *http.Request
 }
 
-func (c *Context) RespondWithErrorMessage(error string, status int) error {
-	return c.Respond(status, error, nil)
-}
-
 func (c *Context) Respond(status int, error string, data interface{}) error {
-	ct := c.Request.Header.Get("Accept")
-	c.ResponseWriter.Header().Set("Content-Type", ct)
-	c.ResponseWriter.WriteHeader(status)
 	var E interface{} = nil
 	if error != "" {
 		E = error
 	}
-	if strings.HasPrefix(ct, "application/json") {
-		encoder := json.NewEncoder(c.ResponseWriter)
-		return encoder.Encode(&Response{S: status, E: E, D: data})
-	} else if strings.HasPrefix(ct, "application/x-msgpack") {
-		encoder := msgpack.NewEncoder(c.ResponseWriter)
-		return encoder.Encode(&Response{S: status, E: E, D: data})
-	}
-	return errors.New("unknown accept type " + ct)
+	return Serializers.Encode(c.Request, c.ResponseWriter, &Response{S: status, E: E, D: data})
+}
+
+func (c *Context) RespondWithErrorMessage(error string, status int) error {
+	return c.Respond(status, error, nil)
+}
+
+func (c *Context) Receive(v interface{}) error {
+	return Serializers.Decode(c.Request, v)
 }
 
 func (c *Context) RespondWithStatus(status int) error {
 	return c.Respond(status, "", nil)
-}
-func (c *Context) Receive(v interface{}) error {
-	// TODO: Check Content-Type/Accepts
-	decoder := json.NewDecoder(c.Request.Body)
-	defer c.Request.Body.Close()
-	return decoder.Decode(v)
 }
 
 func (c *Context) RespondWithData(v interface{}) error {
