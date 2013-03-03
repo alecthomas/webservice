@@ -223,7 +223,7 @@ func (r *Route) apply(args []string, writer http.ResponseWriter, req *http.Reque
 	var request interface{} = nil
 	if r.request != nil {
 		v := reflect.New(r.request.Elem())
-		err := Serializers.Decode(req, v.Interface())
+		err := Serializers.DecodeRequest(req, v.Interface())
 		if err != nil {
 			cx.RespondWithErrorMessage(err.Error(), http.StatusBadRequest)
 			return true
@@ -333,7 +333,7 @@ func (c *Context) Respond(status int, error string, data interface{}) error {
 	if error != "" {
 		E = error
 	}
-	return Serializers.Encode(c.Request, c.ResponseWriter, &Response{S: status, E: E, D: data})
+	return Serializers.EncodeResponse(c.Request, c.ResponseWriter, &Response{S: status, E: E, D: data})
 }
 
 func (c *Context) RespondWithErrorMessage(error string, status int) error {
@@ -341,7 +341,7 @@ func (c *Context) RespondWithErrorMessage(error string, status int) error {
 }
 
 func (c *Context) Receive(v interface{}) error {
-	return Serializers.Decode(c.Request, v)
+	return Serializers.DecodeRequest(c.Request, v)
 }
 
 func (c *Context) RespondWithStatus(status int) error {
