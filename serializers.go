@@ -1,13 +1,12 @@
 package webservice
 
 import (
-	"encoding/base64"
+	"code.google.com/p/vitess/go/bson"
 	"encoding/json"
 	"errors"
 	"github.com/vmihailenco/msgpack"
 	"io"
 	"io/ioutil"
-	"labix.org/v2/mgo/bson"
 	"net/http"
 )
 
@@ -19,6 +18,48 @@ var (
 	}
 	UnsupportedContentType = errors.New("unsupported content type")
 )
+
+type SerializerMap map[string]Serializer
+
+func (s SerializerMap) DecodeRequest(req *http.Request, v interface{}) error {
+	ct := req.Header.Get("Content-Type")
+	return s.Decode(ct, req.Body, v)
+}
+
+func (s SerializerMap) Decode(ct string, r io.Reader, v interface{}) error {
+	if ser, ok := s[ct]; ok {
+		decoder := ser.NewDecoder(r)
+		return decoder.Decode(v)
+	}
+	return UnsupportedContentType
+}
+
+func (s SerializerMap) EncodeResponse(req *http.Request, resp http.ResponseWriter, response *Response) error {
+	ct := req.Header.Get("Accept")
+	if ct == "" {
+		ct = req.Header.Get("Content-Type")
+	}
+	resp.Header().Set("Content-Type", ct)
+	// TODO: Figure out ordering here that isn't shit.
+	if ser, ok := s[ct]; ok {
+		resp.WriteHeader(response.S)
+		return s.rawEncode(ser, resp, response)
+	}
+	resp.WriteHeader(http.StatusBadRequest)
+	return UnsupportedContentType
+}
+
+func (s SerializerMap) Encode(ct string, w io.Writer, v interface{}) error {
+	if ser, ok := s[ct]; ok {
+		return s.rawEncode(ser, w, v)
+	}
+	return UnsupportedContentType
+}
+
+func (s SerializerMap) rawEncode(ser Serializer, w io.Writer, v interface{}) error {
+	encoder := ser.NewEncoder(w)
+	return encoder.Encode(v)
+}
 
 type ContentTypeDecoder interface {
 	Decode(v interface{}) error
@@ -43,41 +84,14 @@ func (j *JsonSerializer) NewDecoder(r io.Reader) ContentTypeDecoder {
 	return json.NewDecoder(r)
 }
 
-type Base64Encoder struct {
-	w io.Writer
-	e func(io.Writer) ContentTypeEncoder
-}
-
-func (m *Base64Encoder) Encode(v interface{}) error {
-	b := base64.NewEncoder(base64.StdEncoding, m.w)
-	defer b.Close()
-	return m.e(b).Encode(v)
-}
-
-type Base64Decoder struct {
-	r io.Reader
-	d func(io.Reader) ContentTypeDecoder
-}
-
-func (b *Base64Decoder) Decode(v interface{}) error {
-	b64 := base64.NewDecoder(base64.StdEncoding, b.r)
-	return b.d(b64).Decode(v)
-}
-
 type MsgpackSerializer struct{}
 
 func (j *MsgpackSerializer) NewEncoder(w io.Writer) ContentTypeEncoder {
-	return &Base64Encoder{
-		w: w,
-		e: func(w io.Writer) ContentTypeEncoder { return msgpack.NewEncoder(w) },
-	}
+	return msgpack.NewEncoder(w)
 }
 
 func (j *MsgpackSerializer) NewDecoder(r io.Reader) ContentTypeDecoder {
-	return &Base64Decoder{
-		r: r,
-		d: func(r io.Reader) ContentTypeDecoder { return msgpack.NewDecoder(r) },
-	}
+	return msgpack.NewDecoder(r)
 }
 
 type BsonSerializer struct{}
@@ -96,10 +110,7 @@ func (b *bsonEncoder) Encode(v interface{}) error {
 }
 
 func (j *BsonSerializer) NewEncoder(w io.Writer) ContentTypeEncoder {
-	return &Base64Encoder{
-		w: w,
-		e: func(w io.Writer) ContentTypeEncoder { return &bsonEncoder{w} },
-	}
+	return &bsonEncoder{w}
 }
 
 type bsonDecoder struct {
@@ -115,46 +126,5 @@ func (b *bsonDecoder) Decode(v interface{}) error {
 }
 
 func (j *BsonSerializer) NewDecoder(r io.Reader) ContentTypeDecoder {
-	return &Base64Decoder{
-		r: r,
-		d: func(r io.Reader) ContentTypeDecoder { return &bsonDecoder{r} },
-	}
-}
-
-type SerializerMap map[string]Serializer
-
-func (s SerializerMap) DecodeRequest(req *http.Request, v interface{}) error {
-	ct := req.Header.Get("Content-Type")
-	return s.Decode(ct, req.Body, v)
-}
-
-func (s SerializerMap) Decode(ct string, r io.Reader, v interface{}) error {
-	if ser, ok := s[ct]; ok {
-		decoder := ser.NewDecoder(r)
-		return decoder.Decode(v)
-	}
-	return UnsupportedContentType
-}
-
-func (s SerializerMap) EncodeResponse(req *http.Request, resp http.ResponseWriter, response *Response) error {
-	ct := req.Header.Get("Accept")
-	if ct == "" {
-		ct = req.Header.Get("Content-Type")
-	}
-	resp.Header().Set("Content-Type", ct)
-	err := s.Encode(ct, resp, response)
-	if err != nil {
-		resp.WriteHeader(http.StatusBadRequest)
-		return UnsupportedContentType
-	}
-	resp.WriteHeader(response.S)
-	return nil
-}
-
-func (s SerializerMap) Encode(ct string, w io.Writer, v interface{}) error {
-	if ser, ok := s[ct]; ok {
-		encoder := ser.NewEncoder(w)
-		return encoder.Encode(v)
-	}
-	return UnsupportedContentType
+	return &bsonDecoder{r}
 }
