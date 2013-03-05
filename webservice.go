@@ -28,7 +28,6 @@ func FunctionDispatcher(function reflect.Value) Dispatcher {
 	return func(cx *Context, req interface{}) bool {
 		shift := 1
 		if req != nil {
-			defer cx.Request.Body.Close()
 			shift++
 		}
 		if functype.NumIn() != shift+len(cx.Args) {
@@ -220,6 +219,7 @@ func (r *Route) fullPath() string {
 
 func (r *Route) apply(args []string, writer http.ResponseWriter, req *http.Request) bool {
 	cx := &Context{args[1:], writer, req}
+	defer cx.Request.Body.Close()
 	var request interface{} = nil
 	if r.request != nil {
 		v := reflect.New(r.request.Elem())
