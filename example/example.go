@@ -27,13 +27,12 @@ func (m *MyService) Delete(cx *ws.Context, id int) {
 
 func main() {
 	ms := &MyService{}
-	ws := ws.NewService()
-	fmt.Printf("%s\n", ws.Post().Path("/blobstore/").DispatchToMethod(ms, "Create"))
-	ws.Get().Path("/blobstore/{id}").DispatchToMethod(ms, "Read")
-	ws.Put().Path("/blobstore/{id}").DispatchToMethod(ms, "Update")
-	ws.Delete().Path("/blobstore/{id}").DispatchToMethod(ms, "Delete")
+	ws := ws.NewService("/blobstore/")
+	fmt.Printf("%s\n", ws.Post().Path("").ToMethod(ms, "Create"))
+	fmt.Printf("%s\n", ws.Get().Path("{id}").ToMethod(ms, "Read"))
+	fmt.Printf("%s\n", ws.Put().Path("{id}").ToMethod(ms, "Update"))
+	fmt.Printf("%s\n", ws.Delete().Path("{id}").ToMethod(ms, "Delete"))
 
-	http.Handle("/blobstore/", ws)
-	http.Handle("/", ws.FallbackHandler)
+	http.Handle("/", ws)
 	http.ListenAndServe(":8080", nil)
 }
